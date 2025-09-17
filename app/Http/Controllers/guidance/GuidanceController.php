@@ -1403,11 +1403,9 @@ class GuidanceController extends Controller
             }
 
             // Close all exam schedules that are in the past or on the end date
-            $closedSchedules = ExamSchedule::where('exam_date', '<=', $settings->exam_end_date)
-                ->where('status', '!=', 'closed')
-                ->update(['status' => 'closed']);
+            $closedSchedules = $this->closePreviousExamSchedules($settings);
 
-            Log::info('Exam registration and schedules auto-closed successfully', [
+            Log::info('Exam registration auto-closed and schedules closed successfully', [
                 'settings_id' => $settings->id,
                 'closed_at' => now(),
                 'schedules_closed' => $closedSchedules,
@@ -1502,26 +1500,115 @@ class GuidanceController extends Controller
      */
     public function updateRegistrationSettings(Request $request)
     {
+        Log::info('[GuidanceController] updateRegistrationSettings - Request received', [
+            'request_data' => $request->all()
+        ]);
+
+        // Basic validation first
         $request->validate([
             'registration_open' => 'required|boolean',
-            'exam_start_date' => 'required_if:registration_open,true|date|after_or_equal:today',
-            'exam_end_date' => 'required_if:registration_open,true|date|after:exam_start_date',
+            'academic_year' => 'nullable|string|max:20',
+            'semester' => 'nullable|string|in:1st,2nd,Summer',
+            'exam_start_date' => 'nullable|date',
+            'exam_end_date' => 'nullable|date',
             'students_per_day' => 'required|integer|min:1|max:100',
-            'registration_message' => 'nullable|string|max:1000'
+            'registration_message' => 'nullable|string|max:1000',
+            'delete_previous_schedules' => 'nullable|boolean'
         ]);
+
+        // Additional validation only when opening registration
+        if ($request->registration_open) {
+            $request->validate([
+                'exam_start_date' => 'required|date|after_or_equal:today',
+                'exam_end_date' => 'required|date|after:exam_start_date'
+            ]);
+        }
 
         try {
             $settings = ExamRegistrationSetting::getCurrentSettings();
+            $wasOpen = $settings->registration_open;
+            $isBeingClosed = $wasOpen && !$request->registration_open;
+            
+            Log::info('[GuidanceController] updateRegistrationSettings - Processing', [
+                'was_open' => $wasOpen,
+                'is_being_closed' => $isBeingClosed,
+                'delete_previous_schedules' => $request->delete_previous_schedules
+            ]);
+            
             $settings->update($request->all());
+
+            // If registration is being closed and user wants to close previous schedules
+            if ($isBeingClosed && $request->delete_previous_schedules) {
+                $this->closePreviousExamSchedules($settings);
+            }
 
             // If registration is being opened, generate exam schedules
             if ($request->registration_open && $request->exam_start_date && $request->exam_end_date) {
                 $this->generateExamSchedules($request->exam_start_date, $request->exam_end_date, $request->students_per_day);
             }
 
-            return back()->with('success', 'Registration settings updated successfully');
+            $message = 'Registration settings updated successfully';
+            if ($isBeingClosed && $request->delete_previous_schedules) {
+                $message .= ' and previous exam schedules have been closed';
+            }
+
+            return back()->with('success', $message);
         } catch (\Exception $e) {
+            Log::error('[GuidanceController] updateRegistrationSettings - Error', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'request_data' => $request->all()
+            ]);
             return back()->withErrors(['error' => 'Failed to update settings: ' . $e->getMessage()]);
+        }
+    }
+
+    /**
+     * Close previous exam schedules when registration is closed
+     */
+    private function closePreviousExamSchedules($settings)
+    {
+        try {
+            // Get all exam schedules that are in the past or on the end date
+            $schedulesToClose = ExamSchedule::where('exam_date', '<=', $settings->exam_end_date)
+                ->where('status', '!=', 'closed')
+                ->get();
+            
+            $closedCount = 0;
+            $closedSchedules = [];
+            
+            foreach ($schedulesToClose as $schedule) {
+                // Log the schedule being closed
+                $closedSchedules[] = [
+                    'id' => $schedule->id,
+                    'exam_date' => $schedule->exam_date,
+                    'session' => $schedule->session,
+                    'current_registrations' => $schedule->current_registrations,
+                    'max_capacity' => $schedule->max_capacity,
+                    'previous_status' => $schedule->status
+                ];
+                
+                $schedule->update(['status' => 'closed']);
+                $closedCount++;
+            }
+            
+            // Log the closure operation
+            Log::info('Previous exam schedules closed due to registration closure', [
+                'settings_id' => $settings->id,
+                'exam_end_date' => $settings->exam_end_date,
+                'closed_count' => $closedCount,
+                'closed_schedules' => $closedSchedules,
+                'closed_at' => now()
+            ]);
+            
+            return $closedCount;
+        } catch (\Exception $e) {
+            Log::error('Failed to close previous exam schedules', [
+                'settings_id' => $settings->id,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            throw $e;
         }
     }
 

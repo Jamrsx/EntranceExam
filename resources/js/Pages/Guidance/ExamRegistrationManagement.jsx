@@ -57,6 +57,10 @@ const ExamRegistrationManagement = ({ user, settings, registrations, schedules }
     const [isSaving, setIsSaving] = useState(false);
     const [autoAssigningIds, setAutoAssigningIds] = useState([]);
     const [expandedDates, setExpandedDates] = useState({});
+    const [showClosedSchedules, setShowClosedSchedules] = useState(false);
+    const [expandedMonths, setExpandedMonths] = useState({});
+    const [closedScheduleFilter, setClosedScheduleFilter] = useState('all'); // all, morning, afternoon
+    const [closedScheduleSearch, setClosedScheduleSearch] = useState('');
     // Bulk code generation modal state
     const [showBulkCodeModal, setShowBulkCodeModal] = useState(false);
     const [examSummaries, setExamSummaries] = useState([]);
@@ -77,7 +81,8 @@ const ExamRegistrationManagement = ({ user, settings, registrations, schedules }
         exam_start_date: settings.exam_start_date,
         exam_end_date: settings.exam_end_date,
         students_per_day: settings.students_per_day,
-        registration_message: settings.registration_message || ''
+        registration_message: settings.registration_message || '',
+        delete_previous_schedules: false
     });
 
     // Keep local copies in sync with server-provided props
@@ -126,14 +131,15 @@ const ExamRegistrationManagement = ({ user, settings, registrations, schedules }
             exam_start_date: settings.exam_start_date,
             exam_end_date: settings.exam_end_date,
             students_per_day: settings.students_per_day,
-            registration_message: settings.registration_message || ''
+            registration_message: settings.registration_message || '',
+            delete_previous_schedules: false
         });
     }, [settings]);
 
     const handleSettingsSubmit = (e) => {
         e.preventDefault();
         
-        // Additional validation for date logic
+        // Additional validation for date logic (only when opening registration)
         if (formData.registration_open && formData.exam_start_date && formData.exam_end_date) {
             const startDate = new Date(formData.exam_start_date);
             const endDate = new Date(formData.exam_end_date);
@@ -151,13 +157,26 @@ const ExamRegistrationManagement = ({ user, settings, registrations, schedules }
             }
         }
         
-        router.put('/guidance/registration-settings', formData, {
-            onSuccess: () => {
+        // Ensure all required fields are present
+        const submitData = {
+            registration_open: formData.registration_open,
+            academic_year: formData.academic_year,
+            semester: formData.semester,
+            exam_start_date: formData.exam_start_date,
+            exam_end_date: formData.exam_end_date,
+            students_per_day: formData.students_per_day,
+            registration_message: formData.registration_message,
+            delete_previous_schedules: formData.delete_previous_schedules || false
+        };
+        
+        router.put('/guidance/registration-settings', submitData, {
+            onSuccess: (page) => {
                 setShowSettingsModal(false);
                 window.showAlert('Registration settings updated successfully', 'success');
             },
             onError: (errors) => {
-                window.showAlert('Failed to update settings', 'error');
+                console.error('[ExamRegistration] Settings update failed:', errors);
+                window.showAlert('Failed to update settings: ' + (errors.error || 'Unknown error'), 'error');
             }
         });
     };
@@ -588,6 +607,101 @@ const ExamRegistrationManagement = ({ user, settings, registrations, schedules }
         return data;
     };
 
+    // Separate active and closed schedules
+    const getActiveAndClosedSchedules = () => {
+        if (!localSchedules || typeof localSchedules !== 'object') return { active: {}, closed: {} };
+        
+        const active = {};
+        const closed = {};
+        
+        Object.keys(localSchedules).forEach(date => {
+            const dateSchedules = localSchedules[date] || [];
+            const activeSchedules = dateSchedules.filter(s => s.status !== 'closed');
+            const closedSchedules = dateSchedules.filter(s => s.status === 'closed');
+            
+            if (activeSchedules.length > 0) {
+                active[date] = activeSchedules;
+            }
+            if (closedSchedules.length > 0) {
+                closed[date] = closedSchedules;
+            }
+        });
+        
+        return { active, closed };
+    };
+
+    // Organize closed schedules by month with filtering
+    const getClosedSchedulesByMonth = () => {
+        const { closed } = getActiveAndClosedSchedules();
+        const byMonth = {};
+        
+        Object.keys(closed).forEach(date => {
+            const scheduleDate = new Date(date);
+            const monthKey = scheduleDate.toLocaleDateString('en-US', { 
+                year: 'numeric', 
+                month: 'long' 
+            });
+            
+            if (!byMonth[monthKey]) {
+                byMonth[monthKey] = {};
+            }
+            
+            // Apply filters
+            let filteredSchedules = closed[date];
+            
+            // Session filter
+            if (closedScheduleFilter !== 'all') {
+                filteredSchedules = filteredSchedules.filter(schedule => 
+                    schedule.session === closedScheduleFilter
+                );
+            }
+            
+            // Search filter
+            if (closedScheduleSearch.trim()) {
+                const searchTerm = closedScheduleSearch.toLowerCase();
+                filteredSchedules = filteredSchedules.filter(schedule => {
+                    const dateStr = formatDate(schedule.exam_date).toLowerCase();
+                    const sessionStr = schedule.session.toLowerCase();
+                    const timeStr = `${formatTime(schedule.start_time)} ${formatTime(schedule.end_time)}`.toLowerCase();
+                    
+                    return dateStr.includes(searchTerm) || 
+                           sessionStr.includes(searchTerm) || 
+                           timeStr.includes(searchTerm);
+                });
+            }
+            
+            if (filteredSchedules.length > 0) {
+                byMonth[monthKey][date] = filteredSchedules;
+            }
+        });
+        
+        // Remove months with no schedules after filtering
+        Object.keys(byMonth).forEach(month => {
+            if (Object.keys(byMonth[month]).length === 0) {
+                delete byMonth[month];
+            }
+        });
+        
+        // Sort months chronologically
+        const sortedMonths = Object.keys(byMonth).sort((a, b) => {
+            const dateA = new Date(a + ' 1');
+            const dateB = new Date(b + ' 1');
+            return dateA - dateB;
+        });
+        
+        const sortedByMonth = {};
+        sortedMonths.forEach(month => {
+            // Sort dates within each month
+            const sortedDates = Object.keys(byMonth[month]).sort((a, b) => new Date(a) - new Date(b));
+            sortedByMonth[month] = {};
+            sortedDates.forEach(date => {
+                sortedByMonth[month][date] = byMonth[month][date];
+            });
+        });
+        
+        return sortedByMonth;
+    };
+
     return (
         <Layout user={user}>
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -718,20 +832,21 @@ const ExamRegistrationManagement = ({ user, settings, registrations, schedules }
                             </div>
                             <h2 className="text-xl font-semibold text-gray-900">Registration Status</h2>
                         </div>
-                        <button
-                            onClick={() => {
-                                // Reset form data to current settings when opening modal
-                                setFormData({
-                                    registration_open: settings.registration_open,
-                                    academic_year: settings.academic_year || getCurrentAcademicYear(),
-                                    semester: settings.semester || '1st',
-                                    exam_start_date: settings.exam_start_date,
-                                    exam_end_date: settings.exam_end_date,
-                                    students_per_day: settings.students_per_day,
-                                    registration_message: settings.registration_message || ''
-                                });
-                                setShowSettingsModal(true);
-                            }}
+                                <button
+                                    onClick={() => {
+                                        // Reset form data to current settings when opening modal
+                                        setFormData({
+                                            registration_open: settings.registration_open,
+                                            academic_year: settings.academic_year || getCurrentAcademicYear(),
+                                            semester: settings.semester || '1st',
+                                            exam_start_date: settings.exam_start_date,
+                                            exam_end_date: settings.exam_end_date,
+                                            students_per_day: settings.students_per_day,
+                                            registration_message: settings.registration_message || '',
+                                            delete_previous_schedules: false
+                                        });
+                                        setShowSettingsModal(true);
+                                    }}
                             className={`px-6 py-3 rounded-lg font-medium transition-all duration-200 transform hover:scale-105 shadow-lg text-white ${
                                 settings.registration_open 
                                     ? 'bg-green-600 hover:bg-green-700' 
@@ -802,7 +917,27 @@ const ExamRegistrationManagement = ({ user, settings, registrations, schedules }
                 <div className="bg-white rounded-lg shadow overflow-hidden mb-6">
                     <div className="px-6 py-4 border-b border-gray-200">
                         <div className="flex items-center justify-between">
-                            <h3 className="text-lg font-medium text-gray-900">Exam Schedules</h3>
+                            <div className="flex items-center gap-4">
+                                <h3 className="text-lg font-medium text-gray-900">Exam Schedules</h3>
+                                {(() => {
+                                    const { active, closed } = getActiveAndClosedSchedules();
+                                    const closedCount = Object.keys(closed).length;
+                                    if (closedCount > 0) {
+                                        return (
+                                            <button
+                                                onClick={() => setShowClosedSchedules(!showClosedSchedules)}
+                                                className="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-orange-700 bg-orange-100 border border-orange-200 rounded-lg hover:bg-orange-200 transition-colors"
+                                            >
+                                                <svg className={`w-4 h-4 transition-transform ${showClosedSchedules ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+                                                </svg>
+                                                {showClosedSchedules ? 'Hide' : 'View'} Closed Schedules ({closedCount})
+                                            </button>
+                                        );
+                                    }
+                                    return null;
+                                })()}
+                            </div>
                             <div className="flex items-center gap-3">
                                 <button
                                     onClick={() => {
@@ -820,43 +955,70 @@ const ExamRegistrationManagement = ({ user, settings, registrations, schedules }
                                 >
                                     Sync Counts
                                 </button>
-                                <button
-                                    onClick={async () => {
-                                        if (!settings.exam_start_date || !settings.exam_end_date) {
-                                            window.showAlert('Please set exam period first.', 'error');
-                                            return;
-                                        }
-                                        try {
-                                            setShowBulkCodeModal(true);
-                                            setLoadingExams(true);
-                                            setSelectedExamId('');
-                                            const res = await fetch('/guidance/exams/summaries', { headers: { 'Accept': 'application/json' } });
-                                            if (!res.ok) throw new Error('Failed to load exams');
-                                            const json = await res.json();
-                                            setExamSummaries(Array.isArray(json.data) ? json.data : []);
-                                        } catch (e) {
-                                            console.warn('[ExamRegistration] load exams failed', e);
-                                            window.showAlert('Failed to load exams. Please try again.', 'error');
-                                            setShowBulkCodeModal(false);
-                                        } finally {
-                                            setLoadingExams(false);
-                                        }
-                                    }}
-                                    className="px-3 py-1 bg-emerald-600 text-white text-xs rounded hover:bg-emerald-700 transition-colors"
-                                    title="Generate exam codes for all dates in the period"
-                                >
-                                    Generate All Codes
-                                </button>
-                                {settings.exam_start_date && settings.exam_end_date && (
-                                    <div className="text-xs text-gray-500">
-                                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-                                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                                            </svg>
-                                            Exam period: {formatDate(settings.exam_start_date)} — {formatDate(settings.exam_end_date)}
-                                        </span>
-                                    </div>
-                                )}
+                                {(() => {
+                                    const { active } = getActiveAndClosedSchedules();
+                                    const hasActiveSchedules = Object.keys(active).length > 0;
+                                    
+                                    return (
+                                        <button
+                                            onClick={async () => {
+                                                if (!hasActiveSchedules) {
+                                                    window.showAlert('No active schedules available for code generation.', 'error');
+                                                    return;
+                                                }
+                                                if (!settings.exam_start_date || !settings.exam_end_date) {
+                                                    window.showAlert('Please set exam period first.', 'error');
+                                                    return;
+                                                }
+                                                try {
+                                                    setShowBulkCodeModal(true);
+                                                    setLoadingExams(true);
+                                                    setSelectedExamId('');
+                                                    const res = await fetch('/guidance/exams/summaries', { headers: { 'Accept': 'application/json' } });
+                                                    if (!res.ok) throw new Error('Failed to load exams');
+                                                    const json = await res.json();
+                                                    setExamSummaries(Array.isArray(json.data) ? json.data : []);
+                                                } catch (e) {
+                                                    console.warn('[ExamRegistration] load exams failed', e);
+                                                    window.showAlert('Failed to load exams. Please try again.', 'error');
+                                                    setShowBulkCodeModal(false);
+                                                } finally {
+                                                    setLoadingExams(false);
+                                                }
+                                            }}
+                                            disabled={!hasActiveSchedules}
+                                            className={`px-3 py-1 text-white text-xs rounded transition-colors ${
+                                                hasActiveSchedules 
+                                                    ? 'bg-emerald-600 hover:bg-emerald-700' 
+                                                    : 'bg-gray-400 cursor-not-allowed'
+                                            }`}
+                                            title={hasActiveSchedules 
+                                                ? "Generate exam codes for all dates in the period" 
+                                                : "No active schedules available"
+                                            }
+                                        >
+                                            Generate All Codes
+                                        </button>
+                                    );
+                                })()}
+                                {(() => {
+                                    const { active } = getActiveAndClosedSchedules();
+                                    const hasActiveSchedules = Object.keys(active).length > 0;
+                                    
+                                    if (settings.exam_start_date && settings.exam_end_date && hasActiveSchedules) {
+                                        return (
+                                            <div className="text-xs text-gray-500">
+                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                                                    </svg>
+                                                    Exam period: {formatDate(settings.exam_start_date)} — {formatDate(settings.exam_end_date)}
+                                                </span>
+                                            </div>
+                                        );
+                                    }
+                                    return null;
+                                })()}
                             </div>
                         </div>
                     </div>
@@ -874,11 +1036,38 @@ const ExamRegistrationManagement = ({ user, settings, registrations, schedules }
                                 </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                                {localSchedules && typeof localSchedules === 'object' && Object.keys(localSchedules).map((examDate) => {
-                                    const dateSchedules = localSchedules[examDate] || [];
-                                    const isExpandedDate = expandedDates[examDate];
-                                    const totalRegistered = dateSchedules.reduce((sum, s) => sum + (s.current_registrations || 0), 0);
-                                    const totalCapacity = dateSchedules.reduce((sum, s) => sum + (s.max_capacity || 0), 0);
+                                {(() => {
+                                    const { active, closed } = getActiveAndClosedSchedules();
+                                    const activeDates = Object.keys(active);
+                                    
+                                    if (activeDates.length === 0) {
+                                        const { closed } = getActiveAndClosedSchedules();
+                                        const closedDates = Object.keys(closed);
+                                        
+                                        return (
+                                            <tr>
+                                                <td colSpan="7" className="px-6 py-8 text-center text-gray-500">
+                                                    <div className="flex flex-col items-center gap-2">
+                                                        <svg className="w-12 h-12 text-orange-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                        </svg>
+                                                        <p className="text-lg font-medium text-orange-600">No Active Exam Schedules</p>
+                                                        {closedDates.length > 0 ? (
+                                                            <p className="text-sm">All exam schedules have been closed. You can view them by clicking "Show Closed Schedules" above.</p>
+                                                        ) : (
+                                                            <p className="text-sm">No exam schedules exist yet. Open registration to generate schedules.</p>
+                                                        )}
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    }
+                                    
+                                    return activeDates.map((examDate) => {
+                                        const dateSchedules = active[examDate] || [];
+                                        const isExpandedDate = expandedDates[examDate];
+                                        const totalRegistered = dateSchedules.reduce((sum, s) => sum + (s.current_registrations || 0), 0);
+                                        const totalCapacity = dateSchedules.reduce((sum, s) => sum + (s.max_capacity || 0), 0);
                                     
                                     return [
                                         // Date header row (expandable)
@@ -1096,10 +1285,206 @@ const ExamRegistrationManagement = ({ user, settings, registrations, schedules }
                                             </tr>
                                         )) : [])
                                     ];
-                                }).flat()}
+                                    }).flat();
+                                })()}
                             </tbody>
                         </table>
                     </div>
+                    
+                    {/* Closed Schedules Section - Organized by Month */}
+                    {showClosedSchedules && (() => {
+                        const closedByMonth = getClosedSchedulesByMonth();
+                        const totalClosedDates = Object.values(closedByMonth).reduce((total, month) => total + Object.keys(month).length, 0);
+                        
+                        if (totalClosedDates === 0) {
+                            return null;
+                        }
+                        
+                        return (
+                            <div className="border-t border-gray-200 bg-gray-50">
+                                <div className="px-6 py-3 bg-orange-50 border-b border-orange-200">
+                                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                                        <div>
+                                            <h4 className="text-sm font-medium text-orange-800 flex items-center gap-2">
+                                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                </svg>
+                                                Closed Exam Schedules ({totalClosedDates} dates, {Object.keys(closedByMonth).length} months)
+                                            </h4>
+                                            <p className="text-xs text-orange-600 mt-1">These schedules are closed and organized by month. Use filters to find specific schedules.</p>
+                                        </div>
+                                        
+                                        {/* Filter Controls */}
+                                        <div className="flex flex-col sm:flex-row gap-2">
+                                            <div className="relative">
+                                                <input
+                                                    type="text"
+                                                    value={closedScheduleSearch}
+                                                    onChange={(e) => setClosedScheduleSearch(e.target.value)}
+                                                    placeholder="Search schedules..."
+                                                    className="w-full sm:w-48 pl-8 pr-3 py-1.5 text-xs border border-orange-200 rounded-md focus:ring-orange-500 focus:border-orange-500 bg-white"
+                                                />
+                                                <svg className="w-3 h-3 text-orange-400 absolute left-2.5 top-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                                                </svg>
+                                            </div>
+                                            <select
+                                                value={closedScheduleFilter}
+                                                onChange={(e) => setClosedScheduleFilter(e.target.value)}
+                                                className="border border-orange-200 rounded-md px-3 py-1.5 text-xs focus:ring-orange-500 focus:border-orange-500 bg-white"
+                                            >
+                                                <option value="all">All Sessions</option>
+                                                <option value="morning">Morning Only</option>
+                                                <option value="afternoon">Afternoon Only</option>
+                                            </select>
+                                            <button
+                                                onClick={() => {
+                                                    setClosedScheduleSearch('');
+                                                    setClosedScheduleFilter('all');
+                                                }}
+                                                className="px-3 py-1.5 text-xs text-orange-700 bg-white border border-orange-200 rounded-md hover:bg-orange-50 transition-colors"
+                                                title="Clear all filters"
+                                            >
+                                                Clear
+                                            </button>
+                                            <button
+                                                onClick={() => {
+                                                    const allMonths = Object.keys(closedByMonth);
+                                                    const allExpanded = allMonths.every(month => expandedMonths[month]);
+                                                    const newState = {};
+                                                    allMonths.forEach(month => {
+                                                        newState[month] = !allExpanded;
+                                                    });
+                                                    setExpandedMonths(newState);
+                                                }}
+                                                className="px-3 py-1.5 text-xs text-orange-700 bg-white border border-orange-200 rounded-md hover:bg-orange-50 transition-colors"
+                                                title="Expand or collapse all months"
+                                            >
+                                                {Object.keys(closedByMonth).every(month => expandedMonths[month]) ? 'Collapse All' : 'Expand All'}
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                {/* Monthly Organization */}
+                                <div className="max-h-96 overflow-y-auto">
+                                    {Object.keys(closedByMonth).map((monthYear) => {
+                                        const monthDates = closedByMonth[monthYear];
+                                        const monthDateCount = Object.keys(monthDates).length;
+                                        const monthScheduleCount = Object.values(monthDates).reduce((total, dateSchedules) => total + dateSchedules.length, 0);
+                                        const isExpanded = expandedMonths[monthYear];
+                                        
+                                        return (
+                                            <div key={monthYear} className="border-b border-gray-200 last:border-b-0">
+                                                {/* Month Header - Clickable */}
+                                                <div 
+                                                    className="bg-gradient-to-r from-gray-100 to-gray-50 px-6 py-3 border-b border-gray-200 cursor-pointer hover:from-gray-150 hover:to-gray-100 transition-colors"
+                                                    onClick={() => setExpandedMonths(prev => ({...prev, [monthYear]: !prev[monthYear]}))}
+                                                >
+                                                    <div className="flex items-center justify-between">
+                                                        <h5 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+                                                            <svg className={`w-4 h-4 text-gray-500 transition-transform ${isExpanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+                                                            </svg>
+                                                            <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                                                            </svg>
+                                                            {monthYear}
+                                                        </h5>
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="text-xs text-gray-500 bg-white px-2 py-1 rounded-full border">
+                                                                {monthDateCount} dates • {monthScheduleCount} sessions
+                                                            </span>
+                                                            <span className="text-xs text-gray-400">
+                                                                {isExpanded ? 'Click to collapse' : 'Click to expand'}
+                                                            </span>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                
+                                                {/* Month Schedules Table - Only show when expanded */}
+                                                {isExpanded && (
+                                                    <div className="overflow-x-auto">
+                                                        <table className="min-w-full">
+                                                        <thead className="bg-gray-100">
+                                                            <tr>
+                                                                <th className="px-6 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                                                                <th className="px-6 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Session</th>
+                                                                <th className="px-6 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Time</th>
+                                                                <th className="px-6 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Capacity</th>
+                                                                <th className="px-6 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Registered</th>
+                                                                <th className="px-6 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody className="bg-white divide-y divide-gray-100">
+                                                            {Object.keys(monthDates).map((examDate) => {
+                                                                const dateSchedules = monthDates[examDate] || [];
+                                                                return dateSchedules.map((schedule, scheduleIndex) => (
+                                                                    <tr key={`closed-${schedule.id}`} className="hover:bg-gray-25">
+                                                                        <td className="px-6 py-2 whitespace-nowrap text-sm text-gray-600">
+                                                                            <div className="flex items-center gap-2">
+                                                                                <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
+                                                                                    isWeekend(examDate) 
+                                                                                        ? 'bg-red-100 text-red-700 border border-red-200' 
+                                                                                        : 'bg-blue-100 text-blue-700 border border-blue-200'
+                                                                                }`}>
+                                                                                    {formatDate(schedule.exam_date)}
+                                                                                </span>
+                                                                                {isWeekend(examDate) && (
+                                                                                    <span className="text-xs text-red-500">(Weekend)</span>
+                                                                                )}
+                                                                            </div>
+                                                                        </td>
+                                                                        <td className="px-6 py-2 whitespace-nowrap text-sm text-gray-600">
+                                                                            <span className="inline-flex px-2 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-800 border">
+                                                                                {schedule.session === 'morning' ? '🌅 Morning' : '🌇 Afternoon'}
+                                                                            </span>
+                                                                        </td>
+                                                                        <td className="px-6 py-2 whitespace-nowrap text-sm text-gray-500">
+                                                                            <span className="font-mono text-xs">
+                                                                                {formatTime(schedule.start_time)} - {formatTime(schedule.end_time)}
+                                                                            </span>
+                                                                        </td>
+                                                                        <td className="px-6 py-2 whitespace-nowrap text-sm text-gray-500">
+                                                                            <span className="inline-flex items-center gap-1">
+                                                                                <svg className="w-3 h-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                                                                                </svg>
+                                                                                {schedule.max_capacity}
+                                                                            </span>
+                                                                        </td>
+                                                                        <td className="px-6 py-2 whitespace-nowrap text-sm text-gray-500">
+                                                                            <span className={`inline-flex items-center gap-1 ${
+                                                                                schedule.current_registrations > 0 ? 'text-blue-600 font-medium' : 'text-gray-400'
+                                                                            }`}>
+                                                                                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                                                </svg>
+                                                                                {schedule.current_registrations}
+                                                                            </span>
+                                                                        </td>
+                                                                        <td className="px-6 py-2 whitespace-nowrap">
+                                                                            <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-700 border border-gray-200">
+                                                                                <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                                                                                </svg>
+                                                                                Closed
+                                                                            </span>
+                                                                        </td>
+                                                                    </tr>
+                                                                ));
+                                                            }).flat()}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        );
+                    })()}
                 </div>
 
                 {/* Examinee Registrations */}
@@ -1260,7 +1645,8 @@ const ExamRegistrationManagement = ({ user, settings, registrations, schedules }
                                             exam_start_date: settings.exam_start_date,
                                             exam_end_date: settings.exam_end_date,
                                             students_per_day: settings.students_per_day,
-                                            registration_message: settings.registration_message || ''
+                                            registration_message: settings.registration_message || '',
+                                            delete_previous_schedules: false
                                         });
                                     }}
                                     className="text-gray-400 hover:text-gray-600"
@@ -1401,6 +1787,40 @@ const ExamRegistrationManagement = ({ user, settings, registrations, schedules }
                                     />
                                 </div>
 
+                                {/* Close Previous Schedules Option - Only show when closing registration */}
+                                {!formData.registration_open && (
+                                    <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
+                                        <div className="flex items-start space-x-3">
+                                            <div className="flex items-center h-5">
+                                                <input
+                                                    id="delete_previous_schedules"
+                                                    type="checkbox"
+                                                    checked={formData.delete_previous_schedules}
+                                                    onChange={(e) => setFormData({...formData, delete_previous_schedules: e.target.checked})}
+                                                    className="w-4 h-4 text-orange-600 bg-gray-100 border-gray-300 rounded focus:ring-orange-500 focus:ring-2"
+                                                />
+                                            </div>
+                                            <div className="flex-1">
+                                                <label htmlFor="delete_previous_schedules" className="text-sm font-medium text-orange-800">
+                                                    Close Previous Exam Schedules
+                                                </label>
+                                                <p className="text-xs text-orange-600 mt-1">
+                                                    <strong>Info:</strong> This will mark all exam schedules from the current exam period as "closed". 
+                                                    Closed schedules will be hidden from the main view but can still be viewed in the "Closed Schedules" section for reference.
+                                                </p>
+                                                <div className="mt-2 text-xs text-orange-700">
+                                                    <div className="flex items-center gap-1">
+                                                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                        </svg>
+                                                        This will close schedules for dates: {formData.exam_start_date ? formatDate(formData.exam_start_date) : 'N/A'} — {formData.exam_end_date ? formatDate(formData.exam_end_date) : 'N/A'}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
                                 <div className="flex justify-end space-x-3 pt-4">
                                     <button
                                         type="button"
@@ -1412,7 +1832,8 @@ const ExamRegistrationManagement = ({ user, settings, registrations, schedules }
                                                 exam_start_date: settings.exam_start_date,
                                                 exam_end_date: settings.exam_end_date,
                                                 students_per_day: settings.students_per_day,
-                                                registration_message: settings.registration_message || ''
+                                                registration_message: settings.registration_message || '',
+                                                delete_previous_schedules: false
                                             });
                                         }}
                                         className="px-4 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50 transition-colors duration-200"
@@ -1566,9 +1987,24 @@ const ExamRegistrationManagement = ({ user, settings, registrations, schedules }
                                 );
                             })()}
 
-                            <div className="text-xs text-gray-600">
-                                Exam period: <span className="font-semibold">{formatDate(settings.exam_start_date)} — {formatDate(settings.exam_end_date)}</span>
-                            </div>
+                            {(() => {
+                                const { active } = getActiveAndClosedSchedules();
+                                const hasActiveSchedules = Object.keys(active).length > 0;
+                                
+                                if (hasActiveSchedules) {
+                                    return (
+                                        <div className="text-xs text-gray-600">
+                                            Exam period: <span className="font-semibold">{formatDate(settings.exam_start_date)} — {formatDate(settings.exam_end_date)}</span>
+                                        </div>
+                                    );
+                                } else {
+                                    return (
+                                        <div className="text-xs text-gray-600">
+                                            <span className="text-orange-600 font-semibold">All exam schedules are closed</span>
+                                        </div>
+                                    );
+                                }
+                            })()}
                         </div>
 
                         <div className="flex justify-end gap-2 mt-6">

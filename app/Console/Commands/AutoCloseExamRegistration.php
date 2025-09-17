@@ -75,7 +75,7 @@ class AutoCloseExamRegistration extends Command
                     ->where('status', '!=', 'closed')
                     ->update(['status' => 'closed']);
 
-                Log::info('Exam registration and schedules auto-closed successfully via command', [
+                Log::info('Exam registration auto-closed and schedules closed successfully via command', [
                     'settings_id' => $settings->id,
                     'closed_at' => now(),
                     'schedules_closed' => $closedSchedules,
